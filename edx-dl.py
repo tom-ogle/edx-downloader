@@ -29,46 +29,53 @@ except ImportError:
     from urllib2 import HTTPCookieProcessor
     from urllib2 import Request
     from urllib2 import URLError
+
 # we alias the raw_input function for python 3 compatibility
 try:
     input = raw_input
 except:
     pass
 
-import getopt
+import argparse
 import getpass
-
 import json
 import os
+import os.path
 import re
 import sys
 import locale
+
 from subprocess import Popen, PIPE
 from datetime import timedelta, datetime
+
 from bs4 import BeautifulSoup
 
-BASE_URL = 'https://courses.edx.org'
+OPENEDX_SITES = {'edx': 'https://courses.edx.org', 'stanford': 'https://class.stanford.edu'}
+BASE_URL = OPENEDX_SITES['edx']
 EDX_HOMEPAGE = BASE_URL + '/login_ajax'
 LOGIN_API = BASE_URL + '/login_ajax'
 DASHBOARD = BASE_URL + '/dashboard'
 
 YOUTUBE_VIDEO_ID_LENGTH = 11
 
-
-## If no download directory is specified, we use the default one
-DEFAULT_DOWNLOAD_DIRECTORY = "./Downloaded/"
-DOWNLOAD_DIRECTORY = DEFAULT_DOWNLOAD_DIRECTORY
-
 ## If nothing else is chosen, we chose the default user agent:
 
-DEFAULT_USER_AGENTS = {"google-chrome": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.31 (KHTML, like Gecko) Chrome/26.0.1410.63 Safari/537.31",
+DEFAULT_USER_AGENTS = {"chrome": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.31 (KHTML, like Gecko) Chrome/26.0.1410.63 Safari/537.31",
                        "firefox": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.8; rv:24.0) Gecko/20100101 Firefox/24.0",
-                       "default": 'edX-downloader/0.01'}
+                       "edx": 'edX-downloader/0.01'}
 
-USER_AGENT = DEFAULT_USER_AGENTS["default"]
+USER_AGENT = DEFAULT_USER_AGENTS["edx"]
 
-USER_EMAIL = ""
-USER_PSWD = ""
+def change_openedx_site(base_url):
+    global BASE_URL
+    global EDX_HOMEPAGE
+    global LOGIN_API
+    global DASHBOARD
+    
+    BASE_URL = base_url
+    EDX_HOMEPAGE = BASE_URL + '/login_ajax'
+    LOGIN_API = BASE_URL + '/login_ajax'
+    DASHBOARD = BASE_URL + '/dashboard'
 
 def myprint(text, *args, **kargs):
     """
@@ -105,10 +112,11 @@ def get_page_contents(url, headers):
     """
     result = urlopen(Request(url, None, headers))
     try:
-        charset = result.headers.get_content_charset(failobj="utf-8")  #for python3
+        charset = result.headers.get_content_charset(failobj="utf-8")  # for python3
     except:
         charset = result.info().getparam('charset') or 'utf-8'
     return result.read().decode(charset)
+
 
 def directory_name(initial_name):
     import string
@@ -116,51 +124,10 @@ def directory_name(initial_name):
     result_name = ""
     for ch in initial_name:
         if allowed_chars.find(ch) != -1:
-            result_name+=ch
+            result_name += ch
     return result_name if result_name != "" else "course_folder"
 
-def parse_commandline_options(argv):
-    global USER_EMAIL, USER_PSWD, DOWNLOAD_DIRECTORY, USER_AGENT
-    opts, args = getopt.getopt(argv,
-                               "u:p:",
-                               ["download-dir=", "user-agent=", "custom-user-agent="])
-    for opt, arg in opts :
-        if opt == "-u" :
-            USER_EMAIL = arg
-
-        elif opt == "-p" :
-            USER_PSWD = arg
-
-        elif opt == "--download-dir" :
-            if arg.strip()[0] == "~" :
-                arg = os.path.expanduser(arg)
-            DOWNLOAD_DIRECTORY = arg
-
-        elif opt == "--user-agent" :
-            if arg in DEFAULT_USER_AGENTS.keys():
-                USER_AGENT = DEFAULT_USER_AGENTS[arg]
-
-
-        elif opt == "--custom-user-agent":
-            USER_AGENT = arg
-
-        elif opt == "-h":
-            usage()
-
-
-def usage() :
-    myprint("command-line options:")
-    myprint("""-u <username>: (Optional) indicate the username.
--p <password>: (Optional) indicate the password.
---download-dir=<path>: (Optional) save downloaded files in <path>
---user-agent=<chrome|firefox>: (Optional) use Google Chrome's of Firefox 24's
-             default user agent as user agent
---custom-user-agent="MYUSERAGENT": (Optional) use the string "MYUSERAGENT" as
-             user agent
-""")
-
-
-def json2srt(o):
+def edx_json2srt(o):
     i = 1
     output = ''
     for (s, e, t) in zip(o['start'], o['end'], o['text']):
@@ -170,26 +137,97 @@ def json2srt(o):
         s = datetime(1, 1, 1) + timedelta(seconds=s/1000.)
         e = datetime(1, 1, 1) + timedelta(seconds=e/1000.)
         output += "%02d:%02d:%02d,%03d --> %02d:%02d:%02d,%03d" % \
-              (s.hour, s.minute, s.second, s.microsecond/1000,
-               e.hour, e.minute, e.second, e.microsecond/1000) + '\n'
+            (s.hour, s.minute, s.second, s.microsecond/1000,
+             e.hour, e.minute, e.second, e.microsecond/1000) + '\n'
         output += t + "\n\n"
         i += 1
     return output
 
-def main():
-    global USER_EMAIL, USER_PSWD
+
+def edx_get_subtitle(url, headers):
+    """ returns a string with the subtitles content from the url """
+    """ or None if no subtitles are available """
     try:
-        parse_commandline_options(sys.argv[1:])
-    except getopt.GetoptError:
-        usage()
+        jsonString = get_page_contents(url, headers)
+        jsonObject = json.loads(jsonString)
+        return edx_json2srt(jsonObject)
+    except URLError as e:
+        myprint('[warning] edX subtitles (error:%s)' % e.reason)
+        return None
+
+
+def parse_args():
+    """
+    Parse the arguments/options passed to the program on the command line.
+    """
+    parser = argparse.ArgumentParser(prog='edx-dl',
+                                     description='Get videos from the OpenEdX platform',
+                                     epilog='For further use information,'
+                                     'see the file README.md',)
+    # positional
+    parser.add_argument('course_id',
+                        nargs='*',
+                        action='store',
+                        default=None,
+                        help='target course id '
+                        '(e.g., https://courses.edx.org/courses/BerkeleyX/CS191x/2013_Spring/info/)'
+                        )
+
+    # optional
+    parser.add_argument('-u',
+                        '--username',
+                        action='store',
+                        help='your edX username (email)')
+    parser.add_argument('-p',
+                        '--password',
+                        action='store',
+                        help='your edX password')
+    parser.add_argument('-f',
+                        '--format',
+                        dest='format',
+                        action='store',
+                        default=None,
+                        help='format of videos to download')
+    parser.add_argument('-s',
+                        '--with-subtitles',
+                        dest='subtitles',
+                        action='store_true',
+                        default=False,
+                        help='download subtitles with the videos')
+    parser.add_argument('-o',
+                        '--output-dir',
+                        action='store',
+                        dest='output_dir',
+                        help='store the files to the specified directory',
+                        default='Downloaded')
+    parser.add_argument('-x',
+                        '--platform',
+                        action='store',
+                        dest='platform',
+                        help='OpenEdX platform, currently either "edx" or "stanford"',
+                        default='edx')
+
+    args = parser.parse_args()
+    return args
+
+
+def main():
+    args = parse_args()
+
+    # if no args means we are calling the interactive version
+    is_interactive = len(sys.argv) == 1
+    if is_interactive:
+        args.platform = input('Platform: ')
+        args.username = input('Username: ')
+        args.password = getpass.getpass()
+
+    if args.platform not in OPENEDX_SITES.keys():
+        myprint("OpenEdX platform should be one of: %s" % ', '.join(OPENEDX_SITES.keys()))
         sys.exit(2)
 
-    if USER_EMAIL == "":
-        USER_EMAIL = input('Username: ')
-    if USER_PSWD == "":
-        USER_PSWD = getpass.getpass()
+    change_openedx_site(OPENEDX_SITES[args.platform])
 
-    if USER_EMAIL == "" or USER_PSWD == "":
+    if not args.username or not args.password:
         myprint("You must supply username AND password to log-in")
         sys.exit(2)
 
@@ -204,7 +242,7 @@ def main():
     }
 
     # Login
-    post_data = urlencode({'email': USER_EMAIL, 'password': USER_PSWD,
+    post_data = urlencode({'email': args.username, 'password': args.password,
                            'remember': False}).encode('utf-8')
     request = Request(LOGIN_API, post_data, headers)
     response = urlopen(request)
@@ -218,12 +256,11 @@ def main():
     soup = BeautifulSoup(dash)
     data = soup.find_all('ul')[1]
     USERNAME = data.find_all('span')[1].string
-    USEREMAIL = data.find_all('span')[3].string
     COURSES = soup.find_all('article', 'course')
     courses = []
     for COURSE in COURSES:
         c_name = COURSE.h3.text.strip()
-        c_link = 'https://courses.edx.org' + COURSE.a['href']
+        c_link = BASE_URL + COURSE.a['href']
         if c_link.endswith('info') or c_link.endswith('info/'):
             state = 'Started'
         else:
@@ -234,7 +271,7 @@ def main():
     # Welcome and Choose Course
 
     myprint('Welcome %s' % USERNAME)
-    myprint('You can access %d courses on edX' % numOfCourses)
+    myprint('You can access %d courses' % numOfCourses)
 
     c = 0
     for course in courses:
@@ -256,7 +293,7 @@ def main():
     data = soup.find("section",
                      {"class": "content-wrapper"}).section.div.div.nav
     WEEKS = data.find_all('div')
-    weeks = [(w.h3.a.string, ['https://courses.edx.org' + a['href'] for a in
+    weeks = [(w.h3.a.string, [BASE_URL + a['href'] for a in
              w.ul.find_all('a')]) for w in WEEKS]
     numOfWeeks = len(weeks)
 
@@ -286,12 +323,12 @@ def main():
     for link in links:
         myprint("Processing '%s'..." % link)
         page = get_page_contents(link, headers)
-        
+
         id_container = splitter.split(page)[1:]
         video_id += [link[:YOUTUBE_VIDEO_ID_LENGTH] for link in
                      id_container]
         subsUrls += [BASE_URL + regexpSubs.search(container).group(1) + id + ".srt.sjson"
-                        for id, container in zip(video_id[-len(id_container):], id_container)]
+                     for id, container in zip(video_id[-len(id_container):], id_container)]
         # Try to download some extra videos which is referred by iframe
         extra_ids = extra_youtube.findall(page)
         video_id += [link[:YOUTUBE_VIDEO_ID_LENGTH] for link in
@@ -301,50 +338,34 @@ def main():
     video_link = ['http://youtube.com/watch?v=' + v_id
                   for v_id in video_id]
 
-    if (len(video_link) < 1):
-      myprint('WARNING: No downloadable video found. ')
-      sys.exit(0)
-    # Get Available Video_Fmts
-    os.system('youtube-dl -F %s' % video_link[-1])
-    video_fmt = int(input('Choose Format code: '))
+    if len(video_link) < 1:
+        myprint('WARNING: No downloadable video found.')
+        sys.exit(0)
 
-    # Get subtitles
-    youtube_subs = False
-    edx_subs = False
+    if is_interactive:
+        # Get Available Video formats
+        os.system('youtube-dl -F %s' % video_link[-1])
+        myprint('Choose a valid format or a set of valid format codes e.g. 22/17/...')
+        args.format = input('Choose Format code: ')
 
-    down_subs = input('Download subtitles (y/n)? ')
-    if str.lower(down_subs) == 'y':
-        myprint('1 - YouTube with fallback from edX (default)')
-        myprint('2 - YouTube only')
-        myprint('3 - edX only')
-        try:
-            down_subs = int(input("Get from: "))
-            if down_subs not in (1, 2, 3):
-                raise ValueError
-        except ValueError:
-            down_subs = 1
+        args.subtitles = input('Download subtitles (y/n)? ').lower() == 'y'
 
-        if down_subs == 1:
-            youtube_subs = True
-            edx_subs = True
-            myprint("Selected: YouTube with fallback from edX")
-        elif down_subs == 2:
-            youtube_subs = True
-            myprint("Selected: YouTube only")
-        elif down_subs == 3:
-            edx_subs = True
-            myprint("Selected: edX's subs only")
-
-    # Say where it's gonna download files, just for clarity's sake.
-    myprint("[download] Saving videos into: " + DOWNLOAD_DIRECTORY)
+    myprint("[info] Output directory: " + args.output_dir)
 
     # Download Videos
     c = 0
     for v, s in zip(video_link, subsUrls):
         c += 1
-        cmd = ["youtube-dl", "-o", DOWNLOAD_DIRECTORY + '/' + directory_name(selected_course[0]) + '/' +
-                                   str(c).zfill(2) + "-%(title)s.%(ext)s", "-f", str(video_fmt)]
-        if youtube_subs:
+        target_dir = os.path.join(args.output_dir,
+                                  directory_name(selected_course[0]))
+        filename_prefix = str(c).zfill(2)
+        cmd = ["youtube-dl",
+               "-o", os.path.join(target_dir, filename_prefix + "-%(title)s.%(ext)s")]
+        if args.format:
+            cmd.append("-f")
+            # defaults to mp4 in case the requested format isn't available
+            cmd.append(args.format + '/mp4')
+        if args.subtitles:
             cmd.append('--write-sub')
         cmd.append(str(v))
 
@@ -352,7 +373,7 @@ def main():
 
         youtube_stdout = b''
         enc = sys.getdefaultencoding()
-        while True:  # Save the output to youtube_stdout while this being echoed
+        while True:  # Save output to youtube_stdout while this being echoed
             tmp = popen_youtube.stdout.read(1)
             youtube_stdout += tmp
             myprint(tmp.decode(enc), end="")
@@ -361,33 +382,33 @@ def main():
             if tmp == b"" and popen_youtube.poll() is not None:
                 break
 
-        if youtube_subs:
-            youtube_stderr = popen_youtube.communicate()[1]
-            if re.search(b'Some error while getting the subtitles', youtube_stderr):
-                if edx_subs:
-                    myprint("YouTube hasn't subtitles. Fallbacking from edX")
-                else:
-                    myprint("WARNING: Subtitles missing")
+        if args.subtitles:
+            filename = get_filename(target_dir, filename_prefix)
+            subs_filename = os.path.join(target_dir, filename + '.srt')
+            if not os.path.exists(subs_filename):
+                subs_string = edx_get_subtitle(s, headers)
+                if subs_string:
+                    myprint('[info] Writing edX subtitles: %s' % subs_filename)
+                    open(os.path.join(os.getcwd(), subs_filename),
+                         'wb+').write(subs_string.encode('utf-8'))
 
-        if edx_subs and s != '':  # write edX subs
-            try:
-                jsonString = get_page_contents(s, headers)
-                jsonObject = json.loads(jsonString)
-                subs_string = json2srt(jsonObject)
 
-                regexp_filename = re.compile(
-                    b'(?:\[download\] ([^\n^\r]*?)(?: has already been downloaded))|(?:Destination: *([^\n^\r]*))')
-                match = re.search(regexp_filename, youtube_stdout)
-                subs_filename = (match.group(1) or match.group(2)).decode('utf-8')[:-4]
-                myprint('[download] ed-x subtitles: %s' % subs_filename+'.srt')
-                open(os.path.join(os.getcwd(), subs_filename)+'.srt', 'wb+').write(subs_string.encode('utf-8'))
-            except URLError as e:
-                myprint('Warning: edX subtitles (error:%s)' % e.reason)
-
+def get_filename(target_dir, filename_prefix):
+    """ returns the basename for the corresponding filename_prefix """
+    # this whole function is not the nicest thing, but isolating it makes
+    # things clearer , a good refactoring would be to get
+    # the info from the video_url or the current output, to avoid the
+    # iteration from the current dir
+    filenames = os.listdir(target_dir)
+    subs_filename = filename_prefix
+    for name in filenames:  # Find the filename of the downloaded video
+        if name.startswith(filename_prefix):
+            (basename, ext) = os.path.splitext(name)
+            return basename
 
 if __name__ == '__main__':
     try:
         main()
-    except KeyboardInterrupt :
+    except KeyboardInterrupt:
         myprint("\n\nCTRL-C detected, shutting down....")
         sys.exit(0)
