@@ -302,138 +302,109 @@ def main():
     courses = []
     for COURSE in COURSES:
         c_name = COURSE.h3.text.strip()
-        c_link = BASE_URL + COURSE.a['href']
-        if c_link.endswith('info') or c_link.endswith('info/'):
-            state = 'Started'
-        else:
-            state = 'Not yet'
-        courses.append((c_name, c_link, state))
-    numOfCourses = len(courses)
-
-    # Welcome and Choose Course
-
+        try:
+            partial_link = COURSE.a['href']
+            c_link = BASE_URL + partial_link
+            if c_link.endswith('info') or c_link.endswith('info/'):
+                state = 'Started'
+            else:
+                state = 'Not yet'
+            courses.append((c_name, c_link, state))
+        except KeyError:
+            print('Caught KeyError')
     print('Welcome %s' % USERNAME)
-    print('You can access %d courses' % numOfCourses)
+    print('Beginning download for all courses')
 
-    for idx, course in enumerate(courses, 1):
-        print('%d - %s -> %s' % (idx, course[0], course[2]))
+    for selected_course in courses:
+        if selected_course[2] != 'Started':
+            print('Skipping course %s -> %s as it is not started' % (selected_course[0], selected_course[2]))
+        else:
+            print('Processing: %s' % selected_course[0])
+            COURSEWARE = selected_course[1].replace('info', 'courseware')
 
-    c_number = int(input('Enter Course Number: '))
-    while c_number > numOfCourses or courses[c_number - 1][2] != 'Started':
-        print('Enter a valid Number for a Started Course ! between 1 and ',
-              numOfCourses)
-        c_number = int(input('Enter Course Number: '))
-    selected_course = courses[c_number - 1]
-    COURSEWARE = selected_course[1].replace('info', 'courseware')
+            # Get Available Weeks
+            courseware = get_page_contents(COURSEWARE, headers)
+            soup = BeautifulSoup(courseware)
 
-    # Get Available Weeks
-    courseware = get_page_contents(COURSEWARE, headers)
-    soup = BeautifulSoup(courseware)
+            data = soup.find(*COURSEWARE_SEL)
+            WEEKS = data.find_all('div')
+            weeks = [(w.h3.a.string, [BASE_URL + a['href'] for a in
+                     w.ul.find_all('a')]) for w in WEEKS]
+            numOfWeeks = len(weeks)
 
-    data = soup.find(*COURSEWARE_SEL)
-    WEEKS = data.find_all('div')
-    weeks = [(w.h3.a.string, [BASE_URL + a['href'] for a in
-             w.ul.find_all('a')]) for w in WEEKS]
-    numOfWeeks = len(weeks)
+            # Choose Week or choose all
+            print('%s has %d weeks so far' % (selected_course[0], numOfWeeks))
+            links = [link for week in weeks for link in week[1]]
 
-    # Choose Week or choose all
-    print('%s has %d weeks so far' % (selected_course[0], numOfWeeks))
-    w = 0
-    for week in weeks:
-        w += 1
-        print('%d - Download %s videos' % (w, week[0].strip()))
-    print('%d - Download them all' % (numOfWeeks + 1))
+            video_ids = []
+            sub_urls = []
+            splitter = re.compile(r'data-streams=(?:&#34;|").*1.0[0]*:')
+            re_subs = re.compile(r'data-transcript-translation-url=(?:&#34;|")([^"&]*)(?:&#34;|")')
+            extra_youtube = re.compile(r'//w{0,3}\.youtube.com/embed/([^ \?&]*)[\?& ]')
+            for link in links:
+                print("Processing '%s'..." % link)
+                page = get_page_contents(link, headers)
+                sections = splitter.split(page)[1:]
+                for section in sections:
+                    video_id = section[:YOUTUBE_VIDEO_ID_LENGTH]
+                    sub_url = ''
+                    if args.subtitles:
+                        match_subs = re_subs.search(section)
+                        if match_subs:
+                            sub_url = BASE_URL + match_subs.group(1) + "/en" + "?videoId=" + video_id
+                    video_ids += [video_id]
+                    sub_urls += [sub_url]
+                # Try to download some extra videos which is referred by iframe
+                extra_ids = extra_youtube.findall(page)
+                video_ids += [link[:YOUTUBE_VIDEO_ID_LENGTH] for link in
+                              extra_ids]
+                sub_urls += ['' for e_id in extra_ids]
 
-    w_number = int(input('Enter Your Choice: '))
-    while w_number > numOfWeeks + 1:
-        print('Enter a valid Number between 1 and %d' % (numOfWeeks + 1))
-        w_number = int(input('Enter Your Choice: '))
+            video_urls = ['http://youtube.com/watch?v=' + v_id
+                          for v_id in video_ids]
 
-    if w_number == numOfWeeks + 1:
-        links = [link for week in weeks for link in week[1]]
-    else:
-        links = weeks[w_number - 1][1]
+            if len(video_urls) < 1:
+                print('WARNING: No downloadable video found.')
 
-    if is_interactive:
-        args.subtitles = input('Download subtitles (y/n)? ').lower() == 'y'
+            print("[info] Output directory: " + args.output_dir)
 
-    video_ids = []
-    sub_urls = []
-    splitter = re.compile(r'data-streams=(?:&#34;|").*1.0[0]*:')
-    re_subs = re.compile(r'data-transcript-translation-url=(?:&#34;|")([^"&]*)(?:&#34;|")')
-    extra_youtube = re.compile(r'//w{0,3}\.youtube.com/embed/([^ \?&]*)[\?& ]')
-    for link in links:
-        print("Processing '%s'..." % link)
-        page = get_page_contents(link, headers)
-        sections = splitter.split(page)[1:]
-        for section in sections:
-            video_id = section[:YOUTUBE_VIDEO_ID_LENGTH]
-            sub_url = ''
-            if args.subtitles:
-                match_subs = re_subs.search(section)
-                if match_subs:
-                    sub_url = BASE_URL + match_subs.group(1) + "/en" + "?videoId=" + video_id
-            video_ids += [video_id]
-            sub_urls += [sub_url]
-        # Try to download some extra videos which is referred by iframe
-        extra_ids = extra_youtube.findall(page)
-        video_ids += [link[:YOUTUBE_VIDEO_ID_LENGTH] for link in
-                      extra_ids]
-        sub_urls += ['' for e_id in extra_ids]
+            # Download Videos
+            c = 0
+            for v, s in zip(video_urls, sub_urls):
+                c += 1
+                target_dir = os.path.join(args.output_dir,
+                                          directory_name(selected_course[0]))
+                filename_prefix = str(c).zfill(2)
+                cmd = ["youtube-dl",
+                       "-o", os.path.join(target_dir, filename_prefix + "-%(title)s.%(ext)s")]
+                if args.subtitles:
+                    cmd.append('--write-sub')
+                cmd.append(str(v))
 
-    video_urls = ['http://youtube.com/watch?v=' + v_id
-                  for v_id in video_ids]
+                popen_youtube = Popen(cmd, stdout=PIPE, stderr=PIPE)
 
-    if len(video_urls) < 1:
-        print('WARNING: No downloadable video found.')
-        sys.exit(0)
+                youtube_stdout = b''
+                try:
+                    while True:  # Save output to youtube_stdout while this being echoed
+                        tmp = popen_youtube.stdout.read(1)
+                        youtube_stdout += tmp
+                        print(tmp, end="")
+                        sys.stdout.flush()
+                        # do it until the process finish and there isn't output
+                        if tmp == b"" and popen_youtube.poll() is not None:
+                            break
 
-    if is_interactive:
-        # Get Available Video formats
-        os.system('youtube-dl -F %s' % video_urls[-1])
-        print('Choose a valid format or a set of valid format codes e.g. 22/17/...')
-        args.format = input('Choose Format code: ')
-
-    print("[info] Output directory: " + args.output_dir)
-
-    # Download Videos
-    c = 0
-    for v, s in zip(video_urls, sub_urls):
-        c += 1
-        target_dir = os.path.join(args.output_dir,
-                                  directory_name(selected_course[0]))
-        filename_prefix = str(c).zfill(2)
-        cmd = ["youtube-dl",
-               "-o", os.path.join(target_dir, filename_prefix + "-%(title)s.%(ext)s")]
-        if args.format:
-            cmd.append("-f")
-            # defaults to mp4 in case the requested format isn't available
-            cmd.append(args.format + '/mp4')
-        if args.subtitles:
-            cmd.append('--write-sub')
-        cmd.append(str(v))
-
-        popen_youtube = Popen(cmd, stdout=PIPE, stderr=PIPE)
-
-        youtube_stdout = b''
-        while True:  # Save output to youtube_stdout while this being echoed
-            tmp = popen_youtube.stdout.read(1)
-            youtube_stdout += tmp
-            print(tmp, end="")
-            sys.stdout.flush()
-            # do it until the process finish and there isn't output
-            if tmp == b"" and popen_youtube.poll() is not None:
-                break
-
-        if args.subtitles:
-            filename = get_filename(target_dir, filename_prefix)
-            subs_filename = os.path.join(target_dir, filename + '.srt')
-            if not os.path.exists(subs_filename):
-                subs_string = edx_get_subtitle(s, headers)
-                if subs_string:
-                    print('[info] Writing edX subtitles: %s' % subs_filename)
-                    open(os.path.join(os.getcwd(), subs_filename),
-                         'wb+').write(subs_string.encode('utf-8'))
+                    if args.subtitles:
+                        filename = get_filename(target_dir, filename_prefix)
+                        subs_filename = os.path.join(target_dir, filename + '.srt')
+                        if not os.path.exists(subs_filename):
+                            subs_string = edx_get_subtitle(s, headers)
+                            if subs_string:
+                                print('[info] Writing edX subtitles: %s' % subs_filename)
+                                open(os.path.join(os.getcwd(), subs_filename),
+                                     'wb+').write(subs_string.encode('utf-8'))
+                except UnicodeDecodeError:
+                    print('Warning: Caught UnicodeDecodeError, skipping this file.')
 
 
 def get_filename(target_dir, filename_prefix):
